@@ -1,5 +1,8 @@
 //! This example proves the knowledge of preimage to a hash chain tail, with a configurable number of elements per hash chain node.
 //! The output of each step tracks the current tail of the hash chain
+use std::fs::{File, OpenOptions};
+use std::io::Write;
+use std::path::Path;
 use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 use ff::Field;
 use flate2::{write::ZlibEncoder, Compression};
@@ -102,21 +105,46 @@ impl<G: Group> StepCircuit<G::Scalar> for HashChainCircuit<G> {
   }
 }
 
+pub static BENCHMARK_DATA_FILE: &str = "./nova_benchmark.csv";
+
+pub fn append_to_bench_data_file(content: String) {
+  let mut data_file = OpenOptions::new()
+      .append(true)
+      .open(BENCHMARK_DATA_FILE)
+      .expect("cannot open file");
+  data_file.write(content.as_bytes()).expect("write failed");
+  println!("Append line: {}", content);
+}
+
+pub fn init_bench_data_file() {
+  let path = Path::new(BENCHMARK_DATA_FILE);
+  if !path.exists() {
+    File::create(&path).unwrap();
+  }
+  println!("Init bench data file in {}", BENCHMARK_DATA_FILE);
+  let header = "num_per_step,num_steps,total_num,time_generating_public_params (s),primary_circuit_constraints,secondary_circuit_constraints,primary_circuit_variables,secondary_circuit_variables,time_init_recursive_snark (s),time_folding (s),time_verify_folding (s),time_compressed_snark_setup (s),time_compressed_snark_prove (s),time_compressed_snark_encoding (s),time_compressed_snark_verify (s),compressed_snark_len (bytes)\n";
+  append_to_bench_data_file(header.to_string());
+}
+
 /// cargo run --release --example and
 fn main() {
   println!("=========================================================");
   println!("Nova-based hashchain example");
   println!("=========================================================");
+  init_bench_data_file();
 
-  let num_steps = 10;
-  for num_elts_per_step in [1024, 2048, 4096] {
-    // number of instances of AND per Nova's recursive step
+  let total_num = 10_000_000;
+
+  for num_steps in [10, 20, 50, 100, 200, 500, 1000, 2000, 5000, 10_000] {
+    let num_elts_per_step = total_num / num_steps;
     let circuit_primary = HashChainCircuit::new(num_elts_per_step);
     let circuit_secondary = TrivialCircuit::default();
 
+    // let num_steps = total_num / num_elts_per_step;
+
     // produce public parameters
     let start = Instant::now();
-    println!("Producing public parameters...");
+    // println!("Producing public parameters...");
     let pp = PublicParams::<
       E1,
       E2,
@@ -129,25 +157,30 @@ fn main() {
       &*S2::ck_floor(),
     )
     .unwrap();
+    let time_generating_public_params = start.elapsed();
     println!("PublicParams::setup, took {:?} ", start.elapsed());
 
     println!(
       "Number of constraints per step (primary circuit): {}",
       pp.num_constraints().0
     );
+    let primary_circuit_constraints = pp.num_constraints().0;
     println!(
       "Number of constraints per step (secondary circuit): {}",
       pp.num_constraints().1
     );
+    let secondary_circuit_constraints = pp.num_constraints().1;
 
     println!(
       "Number of variables per step (primary circuit): {}",
       pp.num_variables().0
     );
+    let primary_circuit_variables = pp.num_variables().0;
     println!(
       "Number of variables per step (secondary circuit): {}",
       pp.num_variables().1
     );
+    let secondary_circuit_variables = pp.num_variables().1;
 
     // produce non-deterministic advice
     let circuits = (0..num_steps)
@@ -161,6 +194,7 @@ fn main() {
     println!(
       "Generating a RecursiveSNARK with {num_elts_per_step} field elements per hashchain node..."
     );
+    let start = Instant::now();
     let mut recursive_snark: RecursiveSNARK<E1, E2, C1, C2> =
       RecursiveSNARK::<E1, E2, C1, C2>::new(
         &pp,
@@ -170,33 +204,40 @@ fn main() {
         &[<E2 as Engine>::Scalar::zero()],
       )
       .unwrap();
+    let time_init_recursive_snark = start.elapsed();
 
+    let start = Instant::now();
     for (i, circuit_primary) in circuits.iter().enumerate() {
-      let start = Instant::now();
+      // let start = Instant::now();
       let res = recursive_snark.prove_step(&pp, circuit_primary, &circuit_secondary);
       assert!(res.is_ok());
 
-      println!("RecursiveSNARK::prove {} : took {:?} ", i, start.elapsed());
+      // println!("RecursiveSNARK::prove {} : took {:?} ", i, start.elapsed());
     }
+    let time_folding = start.elapsed();
 
     // verify the recursive SNARK
     println!("Verifying a RecursiveSNARK...");
+    let start = Instant::now();
     let res = recursive_snark.verify(
       &pp,
       num_steps,
       &[<E1 as Engine>::Scalar::ZERO],
       &[<E2 as Engine>::Scalar::ZERO],
     );
+    let time_verify_folding = start.elapsed();
     println!("RecursiveSNARK::verify: {:?}", res.is_ok(),);
     assert!(res.is_ok());
 
     // produce a compressed SNARK
     println!("Generating a CompressedSNARK using Spartan with HyperKZG...");
+    let start = Instant::now();
     let (pk, vk) = CompressedSNARK::<_, _, _, _, S1, S2>::setup(&pp).unwrap();
+    let time_compressed_snark_setup = start.elapsed();
 
     let start = Instant::now();
-
     let res = CompressedSNARK::<_, _, _, _, S1, S2>::prove(&pp, &pk, &recursive_snark);
+    let time_compressed_snark_prove = start.elapsed();
     println!(
       "CompressedSNARK::prove: {:?}, took {:?}",
       res.is_ok(),
@@ -205,13 +246,17 @@ fn main() {
     assert!(res.is_ok());
     let compressed_snark = res.unwrap();
 
+    let start = Instant::now();
     let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
     bincode::serialize_into(&mut encoder, &compressed_snark).unwrap();
     let compressed_snark_encoded = encoder.finish().unwrap();
+    let time_compressed_snark_encoding = start.elapsed();
     println!(
       "CompressedSNARK::len {:?} bytes",
       compressed_snark_encoded.len()
     );
+
+    let compressed_snark_len = compressed_snark_encoded.len();
 
     // verify the compressed SNARK
     println!("Verifying a CompressedSNARK...");
@@ -222,6 +267,7 @@ fn main() {
       &[<E1 as Engine>::Scalar::ZERO],
       &[<E2 as Engine>::Scalar::ZERO],
     );
+    let time_compressed_snark_verify = start.elapsed();
     println!(
       "CompressedSNARK::verify: {:?}, took {:?}",
       res.is_ok(),
@@ -229,5 +275,18 @@ fn main() {
     );
     assert!(res.is_ok());
     println!("=========================================================");
+
+    let time_generating_public_params = time_generating_public_params.as_secs_f32();
+    let time_init_recursive_snark = time_init_recursive_snark.as_secs_f32();
+    let time_folding = time_folding.as_secs_f32();
+    let time_verify_folding = time_verify_folding.as_secs_f32();
+    let time_compressed_snark_setup = time_compressed_snark_setup.as_secs_f32();
+    let time_compressed_snark_prove = time_compressed_snark_prove.as_secs_f32();
+    let time_compressed_snark_encoding = time_compressed_snark_encoding.as_secs_f32();
+    let time_compressed_snark_verify = time_compressed_snark_verify.as_secs_f32();
+
+    let line = format!("{num_elts_per_step},{num_steps},{total_num},{time_generating_public_params},{primary_circuit_constraints},{secondary_circuit_constraints},{primary_circuit_variables},{secondary_circuit_variables},{time_init_recursive_snark},{time_folding},{time_verify_folding},{time_compressed_snark_setup},{time_compressed_snark_prove},{time_compressed_snark_encoding},{time_compressed_snark_verify},{compressed_snark_len}\n");
+
+    append_to_bench_data_file(line)
   }
 }
