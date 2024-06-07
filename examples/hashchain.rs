@@ -25,7 +25,7 @@ use nova_snark::{
   },
   CompressedSNARK, PublicParams, RecursiveSNARK,
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 type E1 = Bn256EngineKZG;
 type E2 = GrumpkinEngine;
@@ -122,7 +122,7 @@ pub fn init_bench_data_file() {
     File::create(&path).unwrap();
   }
   println!("Init bench data file in {}", BENCHMARK_DATA_FILE);
-  let header = "num_per_step,num_steps,total_num,time_generating_public_params (s),primary_circuit_constraints,secondary_circuit_constraints,primary_circuit_variables,secondary_circuit_variables,time_init_recursive_snark (s),time_folding (s),time_verify_folding (s),time_compressed_snark_setup (s),time_compressed_snark_prove (s),time_compressed_snark_encoding (s),time_compressed_snark_verify (s),compressed_snark_len (bytes)\n";
+  let header = "num_per_step,num_steps,total_num,time_generating_public_params (s),primary_circuit_constraints,secondary_circuit_constraints,primary_circuit_variables,secondary_circuit_variables,total_constraints,time_init_recursive_snark (s),time_folding (s),time_per_folding (s),time_verify_folding (s),time_compressed_snark_setup (s),time_compressed_snark_prove (s),time_compressed_snark_encoding (s),time_compressed_snark_verify (s),compressed_snark_len (bytes)\n";
   append_to_bench_data_file(header.to_string());
 }
 
@@ -187,6 +187,8 @@ fn main() {
       .map(|_| HashChainCircuit::new(num_elts_per_step))
       .collect::<Vec<_>>();
 
+    let total_constraints = (pp.num_constraints().0 + pp.num_constraints().1) * num_steps;
+
     type C1 = HashChainCircuit<<E1 as Engine>::GE>;
     type C2 = TrivialCircuit<<E2 as Engine>::Scalar>;
 
@@ -206,15 +208,20 @@ fn main() {
       .unwrap();
     let time_init_recursive_snark = start.elapsed();
 
-    let start = Instant::now();
+    // let start = Instant::now();
+    let mut time_folding = Duration::from_millis(0);
     for (i, circuit_primary) in circuits.iter().enumerate() {
       // let start = Instant::now();
+      let start = Instant::now();
       let res = recursive_snark.prove_step(&pp, circuit_primary, &circuit_secondary);
+      time_folding += start.elapsed();
       assert!(res.is_ok());
 
       // println!("RecursiveSNARK::prove {} : took {:?} ", i, start.elapsed());
     }
-    let time_folding = start.elapsed();
+    let time_per_folding = time_folding / num_steps as u32;
+
+    // let time_folding = start.elapsed();
 
     // verify the recursive SNARK
     println!("Verifying a RecursiveSNARK...");
@@ -279,13 +286,14 @@ fn main() {
     let time_generating_public_params = time_generating_public_params.as_secs_f32();
     let time_init_recursive_snark = time_init_recursive_snark.as_secs_f32();
     let time_folding = time_folding.as_secs_f32();
+    let time_per_folding = time_per_folding.as_secs_f32();
     let time_verify_folding = time_verify_folding.as_secs_f32();
     let time_compressed_snark_setup = time_compressed_snark_setup.as_secs_f32();
     let time_compressed_snark_prove = time_compressed_snark_prove.as_secs_f32();
     let time_compressed_snark_encoding = time_compressed_snark_encoding.as_secs_f32();
     let time_compressed_snark_verify = time_compressed_snark_verify.as_secs_f32();
 
-    let line = format!("{num_elts_per_step},{num_steps},{total_num},{time_generating_public_params},{primary_circuit_constraints},{secondary_circuit_constraints},{primary_circuit_variables},{secondary_circuit_variables},{time_init_recursive_snark},{time_folding},{time_verify_folding},{time_compressed_snark_setup},{time_compressed_snark_prove},{time_compressed_snark_encoding},{time_compressed_snark_verify},{compressed_snark_len}\n");
+    let line = format!("{num_elts_per_step},{num_steps},{total_num},{time_generating_public_params},{primary_circuit_constraints},{secondary_circuit_constraints},{primary_circuit_variables},{secondary_circuit_variables},{total_constraints},{time_init_recursive_snark},{time_folding},{time_per_folding},{time_verify_folding},{time_compressed_snark_setup},{time_compressed_snark_prove},{time_compressed_snark_encoding},{time_compressed_snark_verify},{compressed_snark_len}\n");
 
     append_to_bench_data_file(line)
   }
